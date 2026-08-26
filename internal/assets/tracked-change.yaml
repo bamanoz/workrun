@@ -1,0 +1,142 @@
+schema_version: 1
+protocol: ">=1.0 <2.0"
+name: tracked-change
+initial: discovering_context
+retry_policies:
+  safe_read:
+    class: read_transient_safe
+    max_attempts: 5
+    initial: 10s
+    maximum: 5m
+  reconciled_write:
+    class: write_reconcile_first
+    max_attempts: 3
+    initial: 10s
+    maximum: 2m
+wake_policies:
+  review_adaptive:
+    intervals: [10m, 30m, 2h]
+    work_hours: true
+states:
+  reconciling:
+    action: reconcile
+    required_capabilities: [tracker.read, requirements.read, change_request.poll]
+    on:
+      complete: discovering_context
+      changed: discovering_context
+      blocked: blocked
+  discovering_context:
+    action: inspect_context
+    required_capabilities: [tracker.read, requirements.read]
+    retry_policy: safe_read
+    on:
+      complete: awaiting_brief_approval
+      needs_input: blocked
+  awaiting_brief_approval:
+    gate: approve_brief
+    on:
+      approved: preparing_workspace
+      changed: discovering_context
+  brief_stale:
+    action: inspect_context
+    required_capabilities: [tracker.read, requirements.read]
+    retry_policy: safe_read
+    on:
+      complete: awaiting_brief_approval
+      needs_input: blocked
+  preparing_workspace:
+    action: prepare_workspace
+    required_capabilities: [vcs.branch]
+    fallbacks:
+      - when_missing: workspace.worktree
+        use: workspace.clone
+    on:
+      complete: implementing
+      blocked: blocked
+  implementing:
+    action: implement_change
+    on:
+      complete: verifying
+      scope_changed: brief_stale
+      blocked: blocked
+  verifying:
+    action: verify_change
+    on:
+      passed: finalizing
+      failed_fixable: implementing
+      blocked: blocked
+  finalizing:
+    action: finalize_change
+    required_capabilities: [vcs.commit]
+    on:
+      complete: publishing
+      needs_changes: implementing
+      blocked: blocked
+  publishing:
+    action: publish_change
+    required_capabilities: [change_request.open, tracker.transition, tracker.comment]
+    retry_policy: reconciled_write
+    on:
+      complete: awaiting_review
+      blocked: blocked
+  awaiting_review:
+    action: poll_change_request
+    required_capabilities: [change_request.poll]
+    retry_policy: safe_read
+    wake_policy: review_adaptive
+    on:
+      no_change: awaiting_review
+      feedback: analyzing_review
+      merged: merged_pending_resolution
+      closed: blocked
+  analyzing_review:
+    action: analyze_review
+    on:
+      complete: awaiting_review_plan_approval
+      no_action: awaiting_review
+      blocked: blocked
+  awaiting_review_plan_approval:
+    gate: approve_review_plan
+    on:
+      approved: confirming_review_plan
+      changed: analyzing_review
+  confirming_review_plan:
+    action: poll_change_request
+    required_capabilities: [change_request.poll]
+    retry_policy: safe_read
+    on:
+      no_change: addressing_review
+      feedback_independent: addressing_review
+      feedback_overlap: analyzing_review
+      merged: merged_pending_resolution
+      closed: blocked
+  addressing_review:
+    action: address_review
+    required_capabilities: [tracker.read, requirements.read, change_request.reply]
+    on:
+      complete: awaiting_review
+      scope_changed: brief_stale
+      blocked: blocked
+  merged_pending_resolution:
+    action: resolve_work_item
+    required_capabilities: [change_request.poll, tracker.transition]
+    retry_policy: reconciled_write
+    on:
+      complete: resolved
+      blocked: blocked
+  blocked:
+    wait: blocked
+    on:
+      resume: discovering_context
+  paused:
+    wait: paused
+    on:
+      resume: discovering_context
+  resolved:
+    terminal: true
+  cancelled:
+    terminal: true
+  superseded:
+    terminal: true
+  failed_permanent:
+    terminal: true
